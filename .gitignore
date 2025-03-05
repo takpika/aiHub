@@ -1,0 +1,5 @@
+.DS_Store
+[Dd]esktop.ini
+poetry.lock
+
+__pycache__/

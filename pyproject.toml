@@ -1,0 +1,41 @@
+[project]
+name = "aihub"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "takpika",email = "takpika@mail.takpika.jp"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "openai (>=1.59.3,<2.0.0)",
+    "pydantic (>=2.10.4,<3.0.0)",
+    "uuid6 (>=2024.7.10,<2025.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pylint]
+[tool.pylint.master]
+disable = [
+    "missing-module-docstring",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "no-method-argument"
+]
+
+[tool.pylint.basic]
+argument-naming-style = "camelCase"
+attr-naming-style = "camelCase"
+class-naming-style = "PascalCase"
+function-naming-style = "camelCase"
+method-naming-style = "camelCase"
+module-naming-style = "snake_case"
+variable-naming-style = "camelCase"
+
+[tool.pylint.format]
+max-line-length = 120

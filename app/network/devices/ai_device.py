@@ -18,8 +18,14 @@ from app.enums.action_type import ActionType
 if TYPE_CHECKING:
     from app.network.devices.room_hub import RoomHub
 
+class TimestampedMessage:
+    def __init__(self, message: ChatCompletionMessageParam, timestamp: float, isSystemMessage: bool = False):
+        self.message = message
+        self.timestamp = timestamp
+        self.isSystemMessage = isSystemMessage
+
 class AIDevice:
-    def __init__(self, name: str, manager: Manager, client: OpenAI, situation: str = "", runAI: bool = True, model: str = "llama3.1:8b", debug: bool = False, coolTime: float = 0.2, timeOut: float = 10) -> None:
+    def __init__(self, name: str, manager: Manager, client: OpenAI, situation: str = "", runAI: bool = True, model: str = "gpt-4o", debug: bool = False, coolTime: float = 0.2, timeOut: float = 10) -> None:
         self.node = manager.createNode(self.onPacketReceived)
         self.name = name
         self.manager = manager
@@ -40,7 +46,7 @@ class AIDevice:
             threading.Thread(target=self.run, daemon=True).start()
 
     def run(self) -> None:
-        def writeFile(messages: Iterable[ChatCompletionMessageParam]) -> None:
+        def writeFile(messages: Iterable[TimestampedMessage]) -> None:
             try:
                 if not os.path.exists("logs"):
                     os.makedirs("logs")
@@ -48,18 +54,32 @@ class AIDevice:
                     with open("logs/.gitignore", "w") as f:
                         f.write("*\n")
                 with open(f"logs/{self.node.uuid}.json", "w") as f:
-                    json.dump(messages, f, ensure_ascii=False, indent=4)
+                    json.dump([msg.message for msg in messages], f, ensure_ascii=False, indent=4)
             except Exception as e:
                 pass
-        messages: Iterable[ChatCompletionMessageParam] = [
-            self.generateSystemPrompt()
+        messages: List[TimestampedMessage] = [
+            TimestampedMessage(self.generateSystemPrompt(), time(), isSystemMessage=True)
         ]
         skipCheck = False
         needsThinking = False
         needsCallFunction = False
         lastTriedFunctions = False
         while True:
-            checkStartTime = time()
+            currentTime = time()
+            # Check if any non-excluded message is older than 2 hours
+            if any(currentTime - msg.timestamp >= 7200 and not msg.isSystemMessage for msg in messages):
+                removedMessages = []
+                newMessages = []
+                for msg in messages:
+                    if msg.isSystemMessage or currentTime - msg.timestamp < 3600:
+                        newMessages.append(msg)
+                    else:
+                        removedMessages.append(msg)
+                messages = newMessages
+                # Process removed messages here
+                # For example, log them or handle them as needed
+
+            checkStartTime = currentTime
             threading.Thread(target=writeFile, args=(messages,)).start()
             while len(self.cachePackets) == 0 and not skipCheck:
                 if time() - checkStartTime > self.timeOut:
@@ -124,26 +144,26 @@ class AIDevice:
                 needsThinking = True
                 lastTriedFunctions = False
                 needsCallFunction = False
-                messages.append(ChatCompletionUserMessageParam(
+                messages.append(TimestampedMessage(ChatCompletionUserMessageParam(
                     content=userMessage,
                     role="user"
-                ))
+                ), time()))
             else:
                 if needsCallFunction:
-                    messages.append(ChatCompletionUserMessageParam(
+                    messages.append(TimestampedMessage(ChatCompletionUserMessageParam(
                         content="SYSTEM: You can call functions now",
                         role="user"
-                    ))
+                    ), time()))
             try:
                 completion: Stream[ChatCompletionChunk] = self.client.chat.completions.create(
                     model=self.model,
-                    messages=messages,
+                    messages=[msg.message for msg in messages],
                     tools=self.getTools(),
                     tool_choice="auto",
                     stream=True
                 )
             except Exception as e:
-                print(json.dumps(messages, ensure_ascii=False))
+                print(json.dumps([msg.message for msg in messages], ensure_ascii=False))
                 raise e
             messageCache: Optional[str] = None
             functionId: Optional[str] = None
@@ -187,8 +207,9 @@ class AIDevice:
             assistant = ChatCompletionAssistantMessageParam(
                 role="assistant"
             )
-            if len(messageCache) == 0:
-                messageCache = None
+            if messageCache is not None:
+                if len(messageCache) == 0:
+                    messageCache = None
             if messageCache is not None:
                 if self.debug: print(self.name, messageCache)
                 assistant["content"] = messageCache
@@ -211,24 +232,24 @@ class AIDevice:
                 assistant["content"] = ""
             if needsCallFunction and len(functionsCache) == 0:
                 skipCheck = True
-            messages.append(assistant)
+            messages.append(TimestampedMessage(assistant, time()))
             for functionId, (functionName, functionArgumentsString) in functionsCache.items():
                 if needsThinking:
-                    messages.append(ChatCompletionToolMessageParam(
+                    messages.append(TimestampedMessage(ChatCompletionToolMessageParam(
                         content=json.dumps({"message": f"error: Write down the reasons for your actions before you act. Then, please try again."}),
                         role="tool",
                         tool_call_id=functionId
-                    ))
+                    ), time()))
                     lastTriedFunctions = True
                     continue
                 try:
                     arguments = json.loads(functionArgumentsString)
                 except json.JSONDecodeError:
-                    messages.append(ChatCompletionToolMessageParam(
+                    messages.append(TimestampedMessage(ChatCompletionToolMessageParam(
                         content=json.dumps({"message": f"error: Invalid JSON"}),
                         role="tool",
                         tool_call_id=functionId
-                    ))
+                    ), time()))
                     continue
                 replyMessage = json.dumps({"message": "success"})
                 try:
@@ -344,11 +365,11 @@ class AIDevice:
                 except Exception as e:
                     replyMessage = json.dumps({"message": "error: Opps! Something went wrong"})
                     print(traceback.format_exc())
-                messages.append(ChatCompletionToolMessageParam(
+                messages.append(TimestampedMessage(ChatCompletionToolMessageParam(
                     content=replyMessage,
                     role="tool",
                     tool_call_id=functionId
-                ))
+                ), time()))
 
     def generateSystemPrompt(self) -> ChatCompletionSystemMessageParam:
         content = f"""

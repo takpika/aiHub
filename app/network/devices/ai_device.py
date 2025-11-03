@@ -133,17 +133,6 @@ class AIDevice:
             pass
 
     def run(self) -> None:
-        def writeFile(messages: Iterable[TimestampedMessage]) -> None:
-            try:
-                if not os.path.exists("logs"):
-                    os.makedirs("logs")
-                if not os.path.exists("logs/.gitignore"):
-                    with open("logs/.gitignore", "w") as f:
-                        f.write("*\n")
-                with open(f"logs/{self.node.uuid}.json", "w") as f:
-                    json.dump([msg.message for msg in messages], f, ensure_ascii=False, indent=4)
-            except Exception as e:
-                pass
         messages: List[TimestampedMessage] = [
             TimestampedMessage(self.generateSystemPrompt(), time(), isSystemMessage=True)
         ]
@@ -167,7 +156,6 @@ class AIDevice:
                 # For example, log them or handle them as needed
 
             checkStartTime = currentTime
-            threading.Thread(target=writeFile, args=(messages,)).start()
             while len(self.cachePackets) == 0 and not skipCheck:
                 if time() - checkStartTime > self.timeOut:
                     break

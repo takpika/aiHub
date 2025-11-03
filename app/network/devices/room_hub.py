@@ -18,13 +18,14 @@ class RouteTableItem(BaseModel):
 
 class RoomHub:
     def __init__(self, name: str, manager: Manager) -> None:
-        self.node = manager.createNode(self.onPacketReceived)
         self.name = name
         self.manager = manager
+        self.node = self.manager.createNode(self.onPacketReceived)
         self.connectedHubs: List[UUID] = []
         self.connectedDevices: List[UUID] = []
         self.routeTable: List[RouteTableItem] = []
         self.onRouteFoundCallbacks: dict[UUID, Callable[[RouteTableItem], None]] = {}
+        self.manager.registerRoomHub(self)
 
     def lookupRoute(self, destination: UUID) -> Optional[RouteTableItem]:
         for hubUuid in self.connectedHubs:
@@ -197,10 +198,24 @@ class RoomHub:
 
     def connectHub(self, hub: "RoomHub") -> None:
         hubNode = hub.node
+        if hubNode.uuid == self.node.uuid:
+            raise ValueError("Hub cannot connect to itself")
+        if hubNode.uuid in self.connectedHubs:
+            return
         self.manager.createConnection(self.node, hubNode)
         self.connectedHubs.append(hubNode.uuid)
-        hub.connectedHubs.append(self.node.uuid)
+        if self.node.uuid not in hub.connectedHubs:
+            hub.connectedHubs.append(self.node.uuid)
 
     def onConnectAI(self, ai: "AIDevice") -> None:
         aiNode = ai.node
         self.connectedDevices.append(aiNode.uuid)
+
+    def removeRoutesFor(self, targetUuid: UUID) -> None:
+        self.routeTable = [
+            item
+            for item in self.routeTable
+            if item.destination != targetUuid and item.nextHop != targetUuid
+        ]
+        if targetUuid in self.onRouteFoundCallbacks:
+            del self.onRouteFoundCallbacks[targetUuid]

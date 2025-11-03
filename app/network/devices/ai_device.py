@@ -25,16 +25,18 @@ class TimestampedMessage:
         self.isSystemMessage = isSystemMessage
 
 class AIDevice:
-    def __init__(self, name: str, manager: Manager, client: OpenAI, situation: str = "", runAI: bool = True, model: str = "gpt-4o", debug: bool = False, coolTime: float = 0.2, timeOut: float = 10) -> None:
-        self.node = manager.createNode(self.onPacketReceived)
+    def __init__(self, name: str, manager: Manager, client: OpenAI, situation: str = "", runAI: bool = True, model: str = "gpt-4o", isReasoning: bool = False, debug: bool = False, coolTime: float = 0.2, timeOut: float = 10) -> None:
         self.name = name
         self.manager = manager
+        self.node = self.manager.createNode(self.onPacketReceived)
         self.client = client
         self.situation = situation
         self.model = model
+        self.isReasoning = isReasoning
         self.debug = debug
         self.coolTime = coolTime
         self.timeOut = timeOut
+        self.runAI = runAI
         self.cachePackets: List[ActionPacket] = []
         self.hubUuid: Optional[UUID] = None
 
@@ -42,6 +44,7 @@ class AIDevice:
         self.connectionCallbacks: dict[UUID, Callable[[ActionPacket], None]] = {}
         self.moveHubRequestResult: Optional[bool] = None
         self.privacyMode = False
+        self.manager.registerDevice(self)
         if runAI:
             threading.Thread(target=self.run, daemon=True).start()
 
@@ -217,6 +220,8 @@ class AIDevice:
                 if lastTriedFunctions:
                     lastTriedFunctions = False
                     needsCallFunction = True
+            if self.isReasoning:
+                needsThinking = False
             if len(functionsCache) > 0:
                 assistant["tool_calls"] = [ChatCompletionMessageToolCallParam(
                     id=toolCallId,

@@ -32,7 +32,7 @@ export OPENAI_BASE_URL="https://api.example.com/v1"
 poetry run uvicorn app.api.main:createApp --factory --reload
 ```
 
-起動後は `http://localhost:8000/web/` にアクセスすると、ブラウザでネットワークビューを確認できます。  
+起動後は `http://localhost:8000/` にアクセスすると、ブラウザでネットワークビューを確認できます。  
 API ドキュメント（OpenAPI）は `http://localhost:8000/docs` で参照できます。
 
 ## プロジェクト構成

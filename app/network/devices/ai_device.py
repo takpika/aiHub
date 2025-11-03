@@ -2,8 +2,9 @@ import os
 import json
 import threading
 import traceback
+from datetime import datetime
 from uuid import UUID
-from typing import Iterable, List, Optional, Callable, TYPE_CHECKING
+from typing import Any, Dict, Iterable, List, Optional, Callable, TYPE_CHECKING
 from time import time, sleep
 
 from openai import OpenAI, Stream
@@ -39,14 +40,97 @@ class AIDevice:
         self.runAI = runAI
         self.cachePackets: List[ActionPacket] = []
         self.hubUuid: Optional[UUID] = None
+        self.isStreaming = False
 
         self.wellKnownNames: dict[str, UUID] = {}
         self.connectionCallbacks: dict[UUID, Callable[[ActionPacket], None]] = {}
+        self._eventListeners: List[Callable[[dict[str, Any]], None]] = []
+        self._eventListenersLock = threading.Lock()
         self.moveHubRequestResult: Optional[bool] = None
         self.privacyMode = False
         self.manager.registerDevice(self)
         if runAI:
             threading.Thread(target=self.run, daemon=True).start()
+
+    def registerEventListener(self, listener: Callable[[dict[str, Any]], None]) -> None:
+        addedListener = False
+        with self._eventListenersLock:
+            if listener not in self._eventListeners:
+                self._eventListeners.append(listener)
+                addedListener = True
+        if addedListener:
+            self._emitContactsDirectory()
+
+    def unregisterEventListener(self, listener: Callable[[dict[str, Any]], None]) -> None:
+        with self._eventListenersLock:
+            if listener in self._eventListeners:
+                self._eventListeners.remove(listener)
+
+    def _emitEvent(self, eventType: str, payload: Dict[str, Any]) -> None:
+        event: Dict[str, Any] = {
+            "type": eventType,
+            "deviceUuid": str(self.node.uuid),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+        event.update(payload)
+        with self._eventListenersLock:
+            listeners = list(self._eventListeners)
+        for listener in listeners:
+            try:
+                listener(event)
+            except Exception:
+                if self.debug:
+                    print(traceback.format_exc())
+
+    def _serializeReasoning(self, reasoning: Any) -> Any:
+        if reasoning is None:
+            return None
+        if hasattr(reasoning, "model_dump"):
+            try:
+                return reasoning.model_dump(mode="json")
+            except TypeError:
+                return reasoning.model_dump()
+        if isinstance(reasoning, list):
+            serialized = []
+            for item in reasoning:
+                if hasattr(item, "model_dump"):
+                    try:
+                        serialized.append(item.model_dump(mode="json"))
+                    except TypeError:
+                        serialized.append(item.model_dump())
+                else:
+                    serialized.append(item)
+            return serialized
+        return reasoning
+
+    def _buildContactsDirectoryEntries(self) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        for name, uuid in sorted(self.wellKnownNames.items(), key=lambda item: str(item[0]).lower()):
+            displayName, entityType = self.manager.resolveNodeInfo(uuid)
+            if uuid == self.node.uuid:
+                displayName = self.name
+                entityType = "device"
+            entry: Dict[str, Any] = {
+                "alias": name,
+                "uuid": str(uuid),
+                "displayName": displayName,
+                "kind": entityType or "unknown",
+            }
+            entries.append(entry)
+        return entries
+
+    def _emitContactsDirectory(self) -> None:
+        entries = self._buildContactsDirectoryEntries()
+        self._emitEvent("contacts.directory", {"entries": entries})
+
+    def _setStreaming(self, isStreaming: bool) -> None:
+        if self.isStreaming == isStreaming:
+            return
+        self.isStreaming = isStreaming
+        try:
+            self.manager.onDeviceStreamingChanged(self, isStreaming)
+        except AttributeError:
+            pass
 
     def run(self) -> None:
         def writeFile(messages: Iterable[TimestampedMessage]) -> None:
@@ -147,6 +231,12 @@ class AIDevice:
                 needsThinking = True
                 lastTriedFunctions = False
                 needsCallFunction = False
+                self._emitEvent("user.message", {
+                    "message": {
+                        "role": "user",
+                        "content": userMessage
+                    }
+                })
                 messages.append(TimestampedMessage(ChatCompletionUserMessageParam(
                     content=userMessage,
                     role="user"
@@ -174,37 +264,79 @@ class AIDevice:
             functionArgumentsStringCache = ""
             functionsCache: dict[str, tuple[str, str]] = {}
             completionStartTime = time()
-            for chunk in completion:
-                if self.debug:
-                    print(chunk)
-                jsonParseResult = True
-                try:
-                    if functionId is not None:
-                        arguments = json.loads(functionArgumentsStringCache)
-                except json.JSONDecodeError:
-                    jsonParseResult = False
-                if len(self.cachePackets) > 0 and completionStartTime - time() > self.coolTime and jsonParseResult:
-                    break
-                if chunk.choices[0].finish_reason != "stop" and chunk.choices[0].finish_reason is not None:
-                    skipCheck = True
-                delta = chunk.choices[0].delta
-                if delta.content is not None:
-                    if messageCache is None:
-                        messageCache = ""
-                    messageCache += delta.content
-                if delta.tool_calls is not None:
-                    toolCall = delta.tool_calls[0]
-                    if toolCall.id is not None and functionId != toolCall.id:
+            responseId: Optional[str] = None
+            responseCreated: Optional[int] = None
+            finishReason: Optional[str] = None
+            streamInterrupted = False
+            self._setStreaming(True)
+            try:
+                for chunk in completion:
+                    if self.debug:
+                        print(chunk)
+                    choice = chunk.choices[0]
+                    delta = choice.delta
+                    if responseId is None and getattr(chunk, "id", None) is not None:
+                        responseId = chunk.id
+                    if responseCreated is None and getattr(chunk, "created", None) is not None:
+                        responseCreated = chunk.created
+                    jsonParseResult = True
+                    try:
                         if functionId is not None:
-                            functionsCache[functionId] = (functionNameCache, functionArgumentsStringCache)
-                        functionId = toolCall.id
-                        functionNameCache = ""
-                        functionArgumentsStringCache = ""
-                    if toolCall.function.name is not None:
-                        functionNameCache += toolCall.function.name
-                    if toolCall.function.arguments is not None:
-                        functionArgumentsStringCache += toolCall.function.arguments
+                            json.loads(functionArgumentsStringCache)
+                    except json.JSONDecodeError:
+                        jsonParseResult = False
+                    if len(self.cachePackets) > 0 and time() - completionStartTime > self.coolTime and jsonParseResult:
+                        streamInterrupted = True
+                        break
+                    if choice.finish_reason is not None:
+                        finishReason = choice.finish_reason
+                        if choice.finish_reason != "stop":
+                            skipCheck = True
+                    deltaPayload: Dict[str, Any] = {}
+                    if delta.role is not None:
+                        deltaPayload["role"] = delta.role
+                    if delta.content is not None:
+                        if messageCache is None:
+                            messageCache = ""
+                        messageCache += delta.content
+                        deltaPayload["content"] = delta.content
+                    reasoningPayload = getattr(delta, "reasoning", None)
+                    if reasoningPayload is not None:
+                        serializedReasoning = self._serializeReasoning(reasoningPayload)
+                        deltaPayload["reasoning"] = serializedReasoning
+                    if delta.tool_calls is not None:
+                        toolCall = delta.tool_calls[0]
+                        if toolCall.id is not None and functionId != toolCall.id:
+                            if functionId is not None:
+                                functionsCache[functionId] = (functionNameCache, functionArgumentsStringCache)
+                            functionId = toolCall.id
+                            functionNameCache = ""
+                            functionArgumentsStringCache = ""
+                        if toolCall.function.name is not None:
+                            functionNameCache += toolCall.function.name
+                        if toolCall.function.arguments is not None:
+                            functionArgumentsStringCache += toolCall.function.arguments
+                    if deltaPayload:
+                        eventPayload: Dict[str, Any] = {
+                            "delta": deltaPayload,
+                            "index": choice.index,
+                            "responseId": responseId,
+                        }
+                        if responseCreated is not None:
+                            eventPayload["created"] = responseCreated
+                        if chunk.model is not None:
+                            eventPayload["model"] = chunk.model
+                        if finishReason is not None:
+                            eventPayload["finishReason"] = finishReason
+                        self._emitEvent("assistant.delta", eventPayload)
+            finally:
+                self._setStreaming(False)
             completion.close()
+            if streamInterrupted:
+                self._emitEvent("assistant.interrupted", {
+                    "reason": "new_input",
+                    "responseId": responseId
+                })
             if functionId is not None:
                 functionsCache[functionId] = (functionNameCache, functionArgumentsStringCache)
             assistant = ChatCompletionAssistantMessageParam(
@@ -220,8 +352,17 @@ class AIDevice:
                 if lastTriedFunctions:
                     lastTriedFunctions = False
                     needsCallFunction = True
+                self._emitEvent("assistant.message", {
+                    "message": {
+                        "role": "assistant",
+                        "content": messageCache
+                    },
+                    "responseId": responseId,
+                    "finishReason": finishReason
+                })
             if self.isReasoning:
                 needsThinking = False
+            functionCallInputs: dict[str, tuple[str, str, bool, Any]] = {}
             if len(functionsCache) > 0:
                 assistant["tool_calls"] = [ChatCompletionMessageToolCallParam(
                     id=toolCallId,
@@ -231,31 +372,66 @@ class AIDevice:
                     ),
                     type="function"
                 ) for toolCallId, (functionName, functionArguments) in functionsCache.items()]
+                for toolCallId, (functionName, functionArguments) in functionsCache.items():
+                    parsedArgs: Any = None
+                    parsedOk = False
+                    try:
+                        parsedArgs = json.loads(functionArguments)
+                        parsedOk = True
+                    except json.JSONDecodeError:
+                        pass
+                    functionCallInputs[toolCallId] = (functionName, functionArguments, parsedOk, parsedArgs)
+                    self._emitEvent("assistant.tool_call", {
+                        "toolCallId": toolCallId,
+                        "name": functionName,
+                        "arguments": parsedArgs if parsedOk else functionArguments,
+                        "argumentsIsJson": parsedOk,
+                        "responseId": responseId
+                    })
                 skipCheck = True
                 needsCallFunction = False
             elif messageCache is None:
                 assistant["content"] = ""
+                self._emitEvent("assistant.message", {
+                    "message": {
+                        "role": "assistant",
+                        "content": ""
+                    },
+                    "responseId": responseId,
+                    "finishReason": finishReason
+                })
             if needsCallFunction and len(functionsCache) == 0:
                 skipCheck = True
             messages.append(TimestampedMessage(assistant, time()))
-            for functionId, (functionName, functionArgumentsString) in functionsCache.items():
+            for functionId, (functionName, functionArgumentsString, parsedOk, parsedArgs) in functionCallInputs.items():
                 if needsThinking:
+                    errorPayload = {"message": "error: Write down the reasons for your actions before you act. Then, please try again."}
                     messages.append(TimestampedMessage(ChatCompletionToolMessageParam(
-                        content=json.dumps({"message": f"error: Write down the reasons for your actions before you act. Then, please try again."}),
+                        content=json.dumps(errorPayload),
                         role="tool",
                         tool_call_id=functionId
                     ), time()))
+                    self._emitEvent("tool.result", {
+                        "toolCallId": functionId,
+                        "name": functionName,
+                        "result": errorPayload
+                    })
                     lastTriedFunctions = True
                     continue
-                try:
-                    arguments = json.loads(functionArgumentsString)
-                except json.JSONDecodeError:
+                if not parsedOk:
+                    errorPayload = {"message": "error: Invalid JSON"}
                     messages.append(TimestampedMessage(ChatCompletionToolMessageParam(
-                        content=json.dumps({"message": f"error: Invalid JSON"}),
+                        content=json.dumps(errorPayload),
                         role="tool",
                         tool_call_id=functionId
                     ), time()))
+                    self._emitEvent("tool.result", {
+                        "toolCallId": functionId,
+                        "name": functionName,
+                        "result": errorPayload
+                    })
                     continue
+                arguments = parsedArgs
                 replyMessage = json.dumps({"message": "success"})
                 try:
                     if functionName == "talk":
@@ -375,6 +551,15 @@ class AIDevice:
                     role="tool",
                     tool_call_id=functionId
                 ), time()))
+                try:
+                    resultPayload = json.loads(replyMessage)
+                except json.JSONDecodeError:
+                    resultPayload = replyMessage
+                self._emitEvent("tool.result", {
+                    "toolCallId": functionId,
+                    "name": functionName,
+                    "result": resultPayload
+                })
 
     def generateSystemPrompt(self) -> ChatCompletionSystemMessageParam:
         content = f"""
@@ -570,6 +755,7 @@ class AIDevice:
         if currentName:
             del self.wellKnownNames[currentName]
         self.wellKnownNames[name] = uuid
+        self._emitContactsDirectory()
         return True
 
     def findUuidFromName(self, name: str) -> Optional[UUID]:
@@ -614,10 +800,16 @@ class AIDevice:
         )
         self.sendPacket(packet)
         self.cachePackets.append(packet)
+        try:
+            self.manager.onDeviceJoinedHub(self, hubUuid)
+        except AttributeError:
+            # Backwards compatibility if manager has not been updated.
+            pass
 
     def leaveHub(self) -> None:
         if not self.hubUuid:
             raise ValueError("AI device is not connected to a hub")
+        currentHubUuid = self.hubUuid
         packet = ActionPacket(
             type=ActionType.LEAVE,
             sender=self.node.uuid,
@@ -626,6 +818,10 @@ class AIDevice:
         self.sendPacket(packet)
         self.cachePackets.append(packet)
         self.hubUuid = None
+        try:
+            self.manager.onDeviceLeftHub(self, currentHubUuid)
+        except AttributeError:
+            pass
 
     def moveHub(self, newHubUuid: UUID) -> None:
         if not self.hubUuid:

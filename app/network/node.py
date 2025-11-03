@@ -6,16 +6,19 @@ from app.models.action_packet import ActionPacket
 
 if TYPE_CHECKING:
     from app.network.connection import Connection
+    from app.network.manager import Manager
 
 class Node:
     def __init__(
         self,
         uuid: Optional[UUID] = None,
-        onPacketReceived: Optional[Callable[[ActionPacket], None]] = None
+        onPacketReceived: Optional[Callable[[ActionPacket], None]] = None,
+        manager: Optional["Manager"] = None,
     ) -> None:
         self.uuid = uuid or uuid7()
         self.connections: List["Connection"] = []
         self.onPacketReceived = onPacketReceived
+        self.manager = manager
 
     def addConnection(self, connection: "Connection") -> None:
         self.connections.append(connection)

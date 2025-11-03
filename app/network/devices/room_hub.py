@@ -25,6 +25,7 @@ class RoomHub:
         self.connectedDevices: List[UUID] = []
         self.routeTable: List[RouteTableItem] = []
         self.onRouteFoundCallbacks: dict[UUID, Callable[[RouteTableItem], None]] = {}
+        self.packetListeners: List[Callable[[ActionPacket], None]] = []
         self.manager.registerRoomHub(self)
 
     def lookupRoute(self, destination: UUID) -> Optional[RouteTableItem]:
@@ -77,8 +78,24 @@ class RoomHub:
                 context=f"{self.node.uuid}",
             ))
 
+    def registerPacketListener(self, listener: Callable[[ActionPacket], None]) -> None:
+        if listener not in self.packetListeners:
+            self.packetListeners.append(listener)
+
+    def unregisterPacketListener(self, listener: Callable[[ActionPacket], None]) -> None:
+        if listener in self.packetListeners:
+            self.packetListeners.remove(listener)
+
+    def _notifyPacketListeners(self, packet: ActionPacket) -> None:
+        for listener in list(self.packetListeners):
+            try:
+                listener(packet.model_copy(deep=True))
+            except Exception:
+                continue
+
     def onPacketReceived(self, packet: ActionPacket) -> None:
         print(f"{self.name} received packet: {packet}")
+        self._notifyPacketListeners(packet)
         if packet.type == ActionType.DISCOVERY_REQUEST:
             if packet.recipient is None:
                 return
@@ -188,7 +205,8 @@ class RoomHub:
             if packet.type == ActionType.WHISPER:
                 packetCopy.context = None
             elif packet.type == ActionType.LEAVE:
-                self.connectedDevices.remove(packet.sender)
+                if packet.sender in self.connectedDevices:
+                    self.connectedDevices.remove(packet.sender)
             for deviceUuid in self.connectedDevices:
                 if deviceUuid != packet.sender and deviceUuid != packet.recipient:
                     self.node.sendPacket(deviceUuid, packetCopy)

@@ -23,6 +23,7 @@ class DeviceInfo(BaseModel):
     timeOut: float
     situation: str
     runAI: bool
+    isStreaming: bool = False
 
 
 class CreateRoomHubRequest(BaseModel):
@@ -42,7 +43,7 @@ class CreateDeviceRequest(BaseModel):
     debug: bool = False
     coolTime: float = 0.2
     timeOut: float = 10
-    hubUuid: Optional[UUID] = None
+    hubUuid: UUID
 
 
 class UpdateDeviceHubRequest(BaseModel):

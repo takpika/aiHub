@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Hub Network</title>
+    <link rel="stylesheet" href="/web/styles.css" />
+</head>
+<body>
+    <header class="app-header">
+        <h1>AI Hub Network</h1>
+        <div class="controls">
+            <label for="apiEndpoint">
+                APIエンドポイント:
+                <input id="apiEndpoint" type="text" spellcheck="false" />
+            </label>
+            <button id="refreshButton" type="button">更新</button>
+            <span id="statusIndicator" class="status status-idle">待機中</span>
+        </div>
+    </header>
+    <main class="app-main">
+        <canvas id="networkCanvas" width="800" height="600"></canvas>
+        <aside id="infoPanel" class="info-panel hidden">
+            <section id="packetStreamSection" class="packet-stream hidden" aria-live="polite">
+                <header class="packet-stream__header">
+                    <span>パケットストリーム</span>
+                    <span id="packetStreamStatus" class="packet-stream__status">未接続</span>
+                </header>
+                <div id="packetMessages" class="packet-stream__messages" role="log"></div>
+            </section>
+            <section id="deviceChatSection" class="device-chat hidden" aria-live="polite">
+                <header class="device-chat__header">
+                    <span>デバイスチャット</span>
+                    <span id="deviceChatStatus" class="device-chat__status">未接続</span>
+                </header>
+                <div class="device-chat__tabs" role="tablist" aria-label="チャット表示モード">
+                    <button id="deviceChatTabChat" class="device-chat__tab is-active" type="button" role="tab" aria-selected="true" aria-controls="deviceChatMessages">
+                        チャット
+                    </button>
+                    <button id="deviceChatTabDirectory" class="device-chat__tab" type="button" role="tab" aria-selected="false" aria-controls="deviceNameDirectory">
+                        名前辞書
+                    </button>
+                </div>
+                <div id="deviceChatMessages" class="device-chat__messages" role="log"></div>
+                <div id="deviceNameDirectory" class="device-chat__directory hidden" role="region" aria-live="polite" aria-label="登録済みの名前辞書"></div>
+            </section>
+            <section id="detailsPanel" class="details-panel hidden">
+                <header class="details-header">
+                    <h2 id="detailsTitle"></h2>
+                    <button id="closeDetailsButton" class="icon-button" type="button" aria-label="閉じる">×</button>
+                </header>
+                <dl>
+                    <div>
+                        <dt>ID</dt>
+                        <dd id="detailsId"></dd>
+                    </div>
+                    <div>
+                        <dt>種類</dt>
+                        <dd id="detailsType"></dd>
+                    </div>
+                    <div id="detailsHubRow" class="hidden">
+                        <dt>所属ハブ</dt>
+                        <dd id="detailsHub"></dd>
+                    </div>
+                    <div id="detailsConnectionsRow" class="hidden">
+                        <dt>接続数</dt>
+                        <dd id="detailsConnections"></dd>
+                    </div>
+                </dl>
+                <section id="deviceHubEditor" class="device-hub-editor hidden">
+                    <div class="device-hub-current">
+                        <span class="device-hub-current__label">現在の接続先</span>
+                        <span id="deviceHubCurrent" class="device-hub-current__value">-</span>
+                    </div>
+                    <label class="device-hub-select" for="deviceHubSelect">
+                        <span>接続先を変更</span>
+                        <select id="deviceHubSelect"></select>
+                    </label>
+                    <button id="deviceHubSaveButton" type="button" class="ghost-button">接続を更新</button>
+                </section>
+                <section id="connectionsSection" class="connections-section hidden">
+                    <header class="connections-header">
+                        <span>接続ハブ</span>
+                        <button id="addConnectionButton" class="ghost-button" type="button">＋ 接続</button>
+                    </header>
+                    <div id="connectionsList" class="chip-list"></div>
+                </section>
+                <div id="detailsActions" class="details-actions hidden">
+                    <button id="deleteHubButton" type="button" class="danger-button">ハブを削除</button>
+                </div>
+            </section>
+        </aside>
+        <div id="tooltip" class="tooltip hidden"></div>
+    </main>
+    <button id="openCreateAgentButton" class="fab fab-agent" type="button" aria-label="エージェントを追加">
+        <span aria-hidden="true">AI</span>
+    </button>
+    <button id="openCreateHubButton" class="fab fab-hub" type="button" aria-label="ハブを追加">
+        <span aria-hidden="true">+</span>
+    </button>
+    <div id="drawerBackdrop" class="drawer-backdrop" aria-hidden="true"></div>
+    <aside id="hubDrawer" class="drawer" aria-hidden="true">
+        <form id="createHubForm" class="drawer-form">
+            <header>
+                <h2>ハブを追加</h2>
+                <button id="closeDrawerButton" type="button" class="close-button" aria-label="閉じる">×</button>
+            </header>
+            <label for="hubNameInput">ハブ名</label>
+            <input id="hubNameInput" type="text" placeholder="例: Main Hub" autocomplete="off" />
+            <button id="createHubButton" type="submit">追加</button>
+        </form>
+    </aside>
+    <aside id="agentDrawer" class="drawer" aria-hidden="true">
+        <form id="createAgentForm" class="drawer-form">
+            <header>
+                <h2>エージェントを追加</h2>
+                <button id="closeAgentDrawerButton" type="button" class="close-button" aria-label="閉じる">×</button>
+            </header>
+            <label for="agentNameInput">エージェント名</label>
+            <input id="agentNameInput" type="text" placeholder="例: Support Agent" autocomplete="off" />
+            <label for="agentModelInput">モデル</label>
+            <input id="agentModelInput" type="text" placeholder="例: gpt-4o" autocomplete="off" />
+            <label for="agentSituationInput">シチュエーション (任意)</label>
+            <textarea id="agentSituationInput" rows="3" placeholder="エージェントの状況説明など"></textarea>
+            <label for="agentHubSelect">接続するハブ</label>
+            <select id="agentHubSelect" required>
+                <option value="">読み込み中...</option>
+            </select>
+            <div class="drawer-checkbox-group">
+                <label class="drawer-checkbox">
+                    <input id="agentRunAICheckbox" type="checkbox" />
+                    <span>自動実行 (runAI)</span>
+                </label>
+                <label class="drawer-checkbox">
+                    <input id="agentReasoningCheckbox" type="checkbox" />
+                    <span>推論モード (isReasoning)</span>
+                </label>
+                <label class="drawer-checkbox">
+                    <input id="agentDebugCheckbox" type="checkbox" />
+                    <span>デバッグログ (debug)</span>
+                </label>
+            </div>
+            <label class="drawer-number-row" for="agentCoolTimeInput">
+                <span>クールタイム (秒)</span>
+                <input id="agentCoolTimeInput" type="number" min="0" step="0.1" inputmode="decimal" />
+            </label>
+            <label class="drawer-number-row" for="agentTimeoutInput">
+                <span>タイムアウト (秒)</span>
+                <input id="agentTimeoutInput" type="number" min="0" step="0.1" inputmode="decimal" />
+            </label>
+            <button id="createAgentButton" type="submit">追加</button>
+        </form>
+    </aside>
+    <div id="connectionPicker" class="connection-picker hidden" aria-hidden="true">
+        <div class="picker-card">
+            <header>
+                <h3>接続先を選択</h3>
+                <button id="closePickerButton" class="icon-button" type="button" aria-label="閉じる">×</button>
+            </header>
+            <div id="connectionOptions" class="picker-options"></div>
+        </div>
+    </div>
+    <script src="/web/app.js" type="module"></script>
+</body>
+</html>

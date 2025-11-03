@@ -1,4 +1,6 @@
-from typing import List, Optional, Callable, TYPE_CHECKING
+import os
+
+from typing import Any, List, Optional, Callable, TYPE_CHECKING, Tuple
 from uuid import UUID
 
 from app.network.node import Node
@@ -15,14 +17,16 @@ class Manager:
         self.connections: List[Connection] = []
         self.roomHubs: List["RoomHub"] = []
         self.devices: List["AIDevice"] = []
+        self._stateChangeListeners: List[Callable[[str, dict[str, Any]], None]] = []
+        self._packetListeners: List[Callable[[UUID, UUID, ActionPacket], None]] = []
 
     def createNode(self, onPacketReceived: Optional[Callable[[ActionPacket], None]] = None) -> Node:
-        node = Node(onPacketReceived=onPacketReceived)
+        node = Node(onPacketReceived=onPacketReceived, manager=self)
         self.nodes.append(node)
         return node
 
     def createConnection(self, node1: Node, node2: Node) -> Connection:
-        connection = Connection(node1, node2)
+        connection = Connection(node1, node2, manager=self)
         self.connections.append(connection)
         return connection
 
@@ -56,6 +60,18 @@ class Manager:
                 return device
         return None
 
+    def resolveNodeInfo(self, uuid: UUID) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Return the display name and logical type for a node in the network.
+        """
+        device = self.getDeviceByUuid(uuid)
+        if device:
+            return device.name, "device"
+        hub = self.getRoomHubByUuid(uuid)
+        if hub:
+            return hub.name, "hub"
+        return None, None
+
     def createAIDevice(
         self,
         name: str,
@@ -71,7 +87,17 @@ class Manager:
         from openai import OpenAI
         from app.network.devices.ai_device import AIDevice
 
-        client = OpenAI()
+        # Allow optional environment overrides for OpenAI client configuration.
+        clientConfig = {}
+        apiKey = os.getenv("OPENAI_API_KEY")
+        if apiKey:
+            clientConfig["api_key"] = apiKey
+
+        baseUrl = os.getenv("OPENAI_BASE_URL")
+        if baseUrl:
+            clientConfig["base_url"] = baseUrl
+
+        client = OpenAI(**clientConfig)
         return AIDevice(
             name=name,
             manager=self,
@@ -97,20 +123,11 @@ class Manager:
         if device.hubUuid == hubUuid:
             return
 
-        if device.hubUuid is None:
-            device.joinHub(hubUuid)
-            return
-
-        previousHubUuid = device.hubUuid
-        device.leaveHub()
-        if previousHubUuid:
+        if device.hubUuid is not None:
             try:
-                self.removeConnectionByUuids(device.node.uuid, previousHubUuid)
+                device.leaveHub()
             except ValueError:
                 pass
-            previousHub = self.getRoomHubByUuid(previousHubUuid)
-            if previousHub and device.node.uuid in previousHub.connectedDevices:
-                previousHub.connectedDevices.remove(device.node.uuid)
 
         device.joinHub(hubUuid)
 
@@ -126,13 +143,6 @@ class Manager:
                 device.leaveHub()
             except ValueError:
                 pass
-            try:
-                self.removeConnectionByUuids(device.node.uuid, previousHubUuid)
-            except ValueError:
-                pass
-            hub = self.getRoomHubByUuid(previousHubUuid)
-            if hub and device.node.uuid in hub.connectedDevices:
-                hub.connectedDevices.remove(device.node.uuid)
 
         self._removeConnectionsForNode(device.node)
 
@@ -140,6 +150,7 @@ class Manager:
             self.devices.remove(device)
         if device.node in self.nodes:
             self.nodes.remove(device.node)
+        self._notifyStateChange("device.deleted", {"deviceUuid": str(uuid)})
 
     def connectRoomHubs(self, uuid1: UUID, uuid2: UUID) -> None:
         if uuid1 == uuid2:
@@ -155,6 +166,10 @@ class Manager:
             raise ValueError("Hubs are already connected")
 
         hub1.connectHub(hub2)
+        self._notifyStateChange(
+            "hub.connection.created",
+            {"sourceHubUuid": str(hub1.node.uuid), "targetHubUuid": str(hub2.node.uuid)},
+        )
 
     def _removeConnection(self, connection: Connection) -> None:
         connection.disconnect()
@@ -204,6 +219,10 @@ class Manager:
 
         hub1.removeRoutesFor(uuid2)
         hub2.removeRoutesFor(uuid1)
+        self._notifyStateChange(
+            "hub.connection.removed",
+            {"sourceHubUuid": str(uuid1), "targetHubUuid": str(uuid2)},
+        )
 
     def deleteRoomHub(self, uuid: UUID) -> None:
         hub = self.getRoomHubByUuid(uuid)
@@ -220,6 +239,7 @@ class Manager:
         for deviceUuid in list(hub.connectedDevices):
             device = self.getDeviceByUuid(deviceUuid)
             if device:
+                self.onDeviceLeftHub(device, hub.node.uuid)
                 device.hubUuid = None
 
         for otherHub in self.roomHubs:
@@ -239,17 +259,89 @@ class Manager:
         hub.connectedHubs.clear()
         hub.routeTable.clear()
         hub.onRouteFoundCallbacks.clear()
+        self._notifyStateChange("hub.deleted", {"hubUuid": str(uuid)})
 
     def registerRoomHub(self, hub: "RoomHub") -> None:
         if hub not in self.roomHubs:
             self.roomHubs.append(hub)
+            self._notifyStateChange("hub.created", {"hubUuid": str(hub.node.uuid)})
 
     def registerDevice(self, device: "AIDevice") -> None:
         if device not in self.devices:
             self.devices.append(device)
+            self._notifyStateChange("device.created", {"deviceUuid": str(device.node.uuid)})
 
     def getRoomHubs(self) -> List["RoomHub"]:
         return list(self.roomHubs)
 
     def getDevices(self) -> List["AIDevice"]:
         return list(self.devices)
+
+    def registerPacketTransferListener(
+        self,
+        listener: Callable[[UUID, UUID, ActionPacket], None],
+    ) -> None:
+        if listener not in self._packetListeners:
+            self._packetListeners.append(listener)
+
+    def unregisterPacketTransferListener(
+        self,
+        listener: Callable[[UUID, UUID, ActionPacket], None],
+    ) -> None:
+        if listener in self._packetListeners:
+            self._packetListeners.remove(listener)
+
+    def notifyPacketTransfer(self, source: Node, target: Node, packet: ActionPacket) -> None:
+        packetCopy = packet.model_copy(deep=True)
+        for listener in list(self._packetListeners):
+            try:
+                listener(source.uuid, target.uuid, packetCopy)
+            except Exception:
+                continue
+
+    def registerStateChangeListener(self, listener: Callable[[str, dict[str, Any]], None]) -> None:
+        if listener not in self._stateChangeListeners:
+            self._stateChangeListeners.append(listener)
+
+    def unregisterStateChangeListener(self, listener: Callable[[str, dict[str, Any]], None]) -> None:
+        if listener in self._stateChangeListeners:
+            self._stateChangeListeners.remove(listener)
+
+    def onDeviceJoinedHub(self, device: "AIDevice", hubUuid: UUID) -> None:
+        hub = self.getRoomHubByUuid(hubUuid)
+        if not hub:
+            return
+        if device.node.uuid not in hub.connectedDevices:
+            hub.connectedDevices.append(device.node.uuid)
+        self._notifyStateChange(
+            "device.moved",
+            {"deviceUuid": str(device.node.uuid), "hubUuid": str(hubUuid)},
+        )
+
+    def onDeviceLeftHub(self, device: "AIDevice", hubUuid: Optional[UUID]) -> None:
+        if not hubUuid:
+            return
+        hub = self.getRoomHubByUuid(hubUuid)
+        if hub and device.node.uuid in hub.connectedDevices:
+            hub.connectedDevices.remove(device.node.uuid)
+        try:
+            self.removeConnectionByUuids(device.node.uuid, hubUuid)
+        except ValueError:
+            pass
+        self._notifyStateChange(
+            "device.moved",
+            {"deviceUuid": str(device.node.uuid), "hubUuid": None},
+        )
+
+    def onDeviceStreamingChanged(self, device: "AIDevice", isStreaming: bool) -> None:
+        self._notifyStateChange(
+            "device.streaming",
+            {"deviceUuid": str(device.node.uuid), "isStreaming": isStreaming},
+        )
+
+    def _notifyStateChange(self, reason: str, changes: Optional[dict[str, Any]] = None) -> None:
+        for listener in list(self._stateChangeListeners):
+            try:
+                listener(reason, dict(changes) if changes else {})
+            except Exception:
+                continue

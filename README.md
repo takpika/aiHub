@@ -27,9 +27,9 @@ export OPENAI_API_KEY="sk-..."
 export OPENAI_BASE_URL="https://api.example.com/v1"
 ```
 
-## 開発サーバーの起動
+## サーバーの起動
 ```bash
-poetry run uvicorn app.api.main:createApp --factory --reload
+uvicorn app.api.main:app --reload
 ```
 
 起動後は `http://localhost:8000/` にアクセスすると、ブラウザでネットワークビューを確認できます。  
